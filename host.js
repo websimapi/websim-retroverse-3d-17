@@ -1,5 +1,5 @@
 import { initializeDatabase, subscribeToGameState, updatePlayersData, updateWorldData, getGameStateRecord, updateSlot } from './database.js';
-import { getPlayer, setPlayerPosition, updatePeers, setMovementEnabled } from './world.js';
+import { getPlayer, setPlayerPosition, updatePeers, setMovementEnabled, setPlayerVisibility } from './world.js';
 import { HOST_DATA_SLOT } from './shared.js';
 
 const UPDATE_INTERVAL = 200; // 5 times per second
@@ -33,6 +33,8 @@ async function startHostHeartbeat(room, recordId, hostUserId) {
 
 // A map to link a client's temporary connection ID to their persistent user ID.
 const clientIdToUserId = new Map();
+// A map to prevent non-host peers from connecting with multiple clients.
+const userIdToClientId = new Map();
 let playersData = {}; // Moved to module scope for access in handler
 const COLLECTION_NAME = 'retroverse_state_v1';
 
@@ -74,6 +76,15 @@ export function handleHostMessage(event, room) {
             if (clientId === room.clientId) return;
             if (!userId) return;
 
+            // Prevent non-host users from connecting with multiple clients
+            if (userId !== room.currentUser.id) { // This check doesn't apply to the host user
+                if (userIdToClientId.has(userId) && userIdToClientId.get(userId) !== clientId) {
+                    console.warn(`User ${userId} attempting to connect with a second client (${clientId}). Ignoring.`);
+                    return; // Ignore this second client
+                }
+                userIdToClientId.set(userId, clientId);
+            }
+
             // Map clientId to userId when we first hear from them
             if (!clientIdToUserId.has(clientId)) {
                 console.log(`Mapping new connection: clientId ${clientId} to userId ${userId}`);
@@ -114,6 +125,10 @@ async function initHost(room, dataDisplayEl, hostUserId, gameStateRecord) {
     const saveBtn = document.getElementById('save-btn');
     const currentUser = await window.websim.getCurrentUser();
 
+    room.currentUser = currentUser; // Attach for easy access in handleHostMessage
+
+    let delegatedHostCharacterClientId = null;
+
     startHostHeartbeat(room, gameStateRecord.id, hostUserId);
 
     const recordId = gameStateRecord.id;
@@ -136,6 +151,24 @@ async function initHost(room, dataDisplayEl, hostUserId, gameStateRecord) {
             setPlayerPosition(savedPosition);
         }
     }
+
+    // New logic in handleHostMessage: if a message from our userId arrives from another client, delegate.
+    const originalOnMessage = room.onmessage;
+    room.onmessage = (event) => {
+        const { data, clientId } = event;
+        if (data.userId === hostUserId && clientId !== room.clientId) {
+            if (delegatedHostCharacterClientId !== clientId) {
+                console.log(`Host character delegated to client ${clientId}. Hiding local character.`);
+                setPlayerVisibility(false);
+                setMovementEnabled(false); // Disable local movement for host
+                delegatedHostCharacterClientId = clientId;
+            }
+        }
+        
+        if (originalOnMessage) {
+            originalOnMessage(event);
+        }
+    };
     
     freezeBtn.addEventListener('click', () => {
         isDatabaseFrozen = !isDatabaseFrozen;
@@ -350,7 +383,20 @@ async function initHost(room, dataDisplayEl, hostUserId, gameStateRecord) {
             if (!connectedClientIds.has(clientId)) {
                 console.log(`Peer disconnected. Removing mapping for client ${clientId} (user ${userId})`);
                 clientIdToUserId.delete(clientId);
+                if (userIdToClientId.get(userId) === clientId) {
+                    userIdToClientId.delete(userId); // Clean up multi-client prevention map
+                }
             }
+        }
+        
+        // Handle host character delegation cleanup
+        if (delegatedHostCharacterClientId && !presence[delegatedHostCharacterClientId]) {
+            console.log("Delegated host character client disconnected. Restoring local character control.");
+            setPlayerVisibility(true);
+            if (!isDatabaseFrozen) {
+                setMovementEnabled(true);
+            }
+            delegatedHostCharacterClientId = null;
         }
     });
 }

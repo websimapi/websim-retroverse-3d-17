@@ -34,6 +34,12 @@ export function setPlayerPosition(position) {
     }
 }
 
+export function setPlayerVisibility(visible) {
+    if (player) {
+        player.visible = visible;
+    }
+}
+
 export function setMovementEnabled(enabled) {
     movementEnabled = enabled;
 }
