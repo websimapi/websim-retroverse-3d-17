@@ -10,7 +10,7 @@ export async function getGameStateRecord(room) {
             
             if (records && records.length > 0) {
                 resolved = true;
-                unsubscribe();
+                setTimeout(() => unsubscribe(), 0);
                 const recordToUse = records.slice().reverse()[0];
                 resolve(recordToUse);
             }
@@ -50,7 +50,7 @@ export function initializeDatabase(room) {
                 if (resolved || !recs || recs.length === 0) return;
                 
                 resolved = true;
-                unsubscribe();
+                setTimeout(() => unsubscribe(), 0);
                 const oldestRecord = recs.slice().reverse()[0];
                 console.log("Game state found via subscription. Using existing record:", oldestRecord.id);
                 resolveCheck(oldestRecord);
