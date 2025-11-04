@@ -3,6 +3,7 @@ import { getGameStateRecord } from './database.js';
 
 const POSITION_UPDATE_INTERVAL = 100; // 10 times per second
 let isGameFrozen = false;
+let positionIntervalId = null; // To hold the interval ID
 
 export function handlePlayerMessage(event, localUserId) {
     const { data } = event;
@@ -24,6 +25,17 @@ export function handlePlayerMessage(event, localUserId) {
         } else {
             statusEl.textContent = 'Connected to Retroverse.';
         }
+        return;
+    }
+
+    if (data.type === 'force_disconnect') {
+        console.error('Disconnected by host:', data.reason);
+        alert(`Disconnected by host: ${data.reason}`);
+        setMovementEnabled(false);
+        if (positionIntervalId) {
+            clearInterval(positionIntervalId);
+        }
+        // You could add more logic here to freeze the UI completely
         return;
     }
 
@@ -54,7 +66,8 @@ export async function initPlayer(room, hostUsername) {
     // Listener is now set in app.js
     
     // Send position updates periodically
-    setInterval(() => {
+    if (positionIntervalId) clearInterval(positionIntervalId); // Clear any existing interval
+    positionIntervalId = setInterval(() => {
         if (isGameFrozen) return; // Don't send position updates if game is frozen
 
         const player = getPlayer();

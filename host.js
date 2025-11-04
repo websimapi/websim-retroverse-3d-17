@@ -13,6 +13,9 @@ const HOST_HEARTBEAT_INTERVAL = 5000; // 5 seconds
 const HOST_TIMEOUT_DURATION = 15000; // 15 seconds
 let hostHeartbeatIntervalId = null;
 
+let hostUserId = null; // Store the host's user ID
+const userIdToClientIds = new Map(); // Tracks all clientIds for a given userId
+
 async function startHostHeartbeat(room, recordId, hostUserId) {
     if (hostHeartbeatIntervalId) {
         clearInterval(hostHeartbeatIntervalId);
@@ -35,16 +38,22 @@ async function startHostHeartbeat(room, recordId, hostUserId) {
 const clientIdToUserId = new Map();
 let playersData = {}; // Moved to module scope for access in handler
 const COLLECTION_NAME = 'retroverse_state_v1';
-let hostUserId; // To be set in initHost
-let isHostCharacterDelegated = false;
-const activeUserIds = new Set(); // To prevent multi-client for peers
-
 
 export function handleHostMessage(event, room) {
     if (isDatabaseFrozen) return; // Halt message processing when frozen
 
     const { data, clientId } = event; // Removed 'username' from destructuring, it's not on the event.
     const { type, position, userId } = data;
+    
+    // Initial connection validation for non-host users
+    if (userId !== hostUserId && userIdToClientIds.has(userId) && !userIdToClientIds.get(userId).has(clientId)) {
+        console.warn(`Duplicate connection attempt by user ${userId} from new client ${clientId}. Rejecting.`);
+        room.send({
+            type: 'force_disconnect',
+            reason: 'Multiple connections are not allowed for players.'
+        }, clientId);
+        return; // Stop processing message from duplicate client
+    }
     
     switch (type) {
         case 'client_chat_message':
@@ -80,18 +89,27 @@ export function handleHostMessage(event, room) {
 
             // Map clientId to userId when we first hear from them
             if (!clientIdToUserId.has(clientId)) {
-                // --- Multi-client validation for peers ---
-                // Allow host to have multiple clients, but not other users.
-                if (userId !== hostUserId && activeUserIds.has(userId)) {
-                    console.warn(`Blocking duplicate connection for user ${userId} from client ${clientId}.`);
-                    return; // Ignore this client's updates
-                }
-
                 console.log(`Mapping new connection: clientId ${clientId} to userId ${userId}`);
                 clientIdToUserId.set(clientId, userId);
-                activeUserIds.add(userId);
             }
 
+            // Also update our multi-client tracking map
+            if (!userIdToClientIds.has(userId)) {
+                userIdToClientIds.set(userId, new Set());
+            }
+            userIdToClientIds.get(userId).add(clientId);
+
+            // Special handling if the host connects a second client
+            if (userId === hostUserId) {
+                const hostClients = userIdToClientIds.get(hostUserId);
+                if (hostClients && hostClients.size > 1) {
+                    // There's more than one client for the host user.
+                    // The original host client should no longer render its own character.
+                    console.log("Host's second client detected. Hiding primary host's character model.");
+                    setPlayerVisibility(false);
+                }
+            }
+            
             // Validate position against stored position
             const storedData = playersData[userId];
             if (storedData && storedData.position) {
@@ -123,6 +141,7 @@ export function handleHostMessage(event, room) {
 async function initHost(room, dataDisplayEl, currentHostUserId, gameStateRecord) {
     console.log("Initializing Host...");
     hostUserId = currentHostUserId; // Set module-level hostUserId
+
     const freezeBtn = document.getElementById('freeze-btn');
     const saveBtn = document.getElementById('save-btn');
     const currentUser = await window.websim.getCurrentUser();
@@ -138,8 +157,8 @@ async function initHost(room, dataDisplayEl, currentHostUserId, gameStateRecord)
         await updateWorldData(room, recordId, { seed: 0 });
     }
 
-    // const currentUser = await window.websim.getCurrentUser();
-    // const hostUserId = currentUser.id;
+    // Add host's own client ID to the tracker
+    userIdToClientIds.set(hostUserId, new Set([room.clientId]));
 
     // Load host's own position if it exists
     if (playersData[hostUserId]) {
@@ -296,31 +315,9 @@ async function initHost(room, dataDisplayEl, currentHostUserId, gameStateRecord)
     setInterval(() => {
         if (isDatabaseFrozen) return; // Don't send updates when frozen
 
-        // --- Host character delegation logic ---
-        let hostPlayerClientPresent = false;
-        for (const [cId, uId] of clientIdToUserId.entries()) {
-            if (uId === hostUserId && cId !== room.clientId) {
-                hostPlayerClientPresent = true;
-                break;
-            }
-        }
-
-        if (hostPlayerClientPresent && !isHostCharacterDelegated) {
-            console.log("Host's player-client connected. Hiding local character.");
-            isHostCharacterDelegated = true;
-            setPlayerVisibility(false); // Hide the host's green cube
-            setMovementEnabled(false);  // Disable movement for the host client
-        } else if (!hostPlayerClientPresent && isHostCharacterDelegated) {
-            console.log("Host's player-client disconnected. Reclaiming local character.");
-            isHostCharacterDelegated = false;
-            setPlayerVisibility(true); // Show the green cube again
-            setMovementEnabled(!isDatabaseFrozen); // Re-enable movement if not editing
-        }
-        // --- End delegation logic ---
-
         // 1. Update host's own data in memory
         const hostPlayer = getPlayer();
-        if (hostPlayer && !isHostCharacterDelegated) { // Only update from local if not delegated
+        if (hostPlayer) {
             playersData[hostUserId] = {
                 username: currentUser.username,
                 position: {
@@ -362,7 +359,7 @@ async function initHost(room, dataDisplayEl, currentHostUserId, gameStateRecord)
         });
         
         // The host's renderer gets the data for ALL known players.
-        updatePeers(allKnownPlayers, hostUserId, isHostCharacterDelegated);
+        updatePeers(allKnownPlayers, hostUserId);
 
     }, UPDATE_INTERVAL);
 
@@ -385,7 +382,21 @@ async function initHost(room, dataDisplayEl, currentHostUserId, gameStateRecord)
             if (!connectedClientIds.has(clientId)) {
                 console.log(`Peer disconnected. Removing mapping for client ${clientId} (user ${userId})`);
                 clientIdToUserId.delete(clientId);
-                activeUserIds.delete(userId); // Clean up active user set
+
+                // Also clean up multi-client tracking map
+                if (userIdToClientIds.has(userId)) {
+                    const clientSet = userIdToClientIds.get(userId);
+                    clientSet.delete(clientId);
+                    if (clientSet.size === 0) {
+                        userIdToClientIds.delete(userId);
+                    }
+
+                    // Special handling if host's second client disconnects
+                    if (userId === hostUserId && clientSet.size === 1) {
+                        console.log("Host's second client disconnected. Restoring primary host's character model.");
+                        setPlayerVisibility(true);
+                    }
+                }
             }
         }
     });
