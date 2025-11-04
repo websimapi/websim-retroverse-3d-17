@@ -13,6 +13,23 @@ const HOST_HEARTBEAT_INTERVAL = 5000; // 5 seconds
 const HOST_TIMEOUT_DURATION = 15000; // 15 seconds
 let hostHeartbeatIntervalId = null;
 
+async function startHostHeartbeat(room, recordId, hostUserId) {
+    if (hostHeartbeatIntervalId) {
+        clearInterval(hostHeartbeatIntervalId);
+    }
+    
+    const updateHeartbeat = () => {
+        console.log("Host heartbeat...");
+        updateSlot(room, recordId, HOST_DATA_SLOT, {
+            hostId: hostUserId,
+            timestamp: Date.now()
+        });
+    };
+
+    updateHeartbeat(); // Immediate update
+    hostHeartbeatIntervalId = setInterval(updateHeartbeat, HOST_HEARTBEAT_INTERVAL);
+}
+
 
 // A map to link a client's temporary connection ID to their persistent user ID.
 const clientIdToUserId = new Map();
@@ -336,4 +353,29 @@ async function initHost(room, dataDisplayEl, hostUserId, gameStateRecord) {
             }
         }
     });
+}
+
+export async function runHostElectionAndInit(room, currentUser, dataDisplayEl) {
+    console.log("Running host election...");
+    const gameStateRecord = await getGameStateRecord(room);
+    if (!gameStateRecord) {
+        console.error("Could not get game state for host election. Aborting host initialization.");
+        return false;
+    }
+    
+    const hostData = gameStateRecord[`slot_${HOST_DATA_SLOT}`];
+    const now = Date.now();
+
+    if (hostData && hostData.hostId && hostData.timestamp) {
+        const timeSinceLastHeartbeat = now - hostData.timestamp;
+        if (hostData.hostId !== currentUser.id && timeSinceLastHeartbeat < HOST_TIMEOUT_DURATION) {
+            console.log(`An active host (${hostData.hostId}) was found. Last heartbeat was ${timeSinceLastHeartbeat / 1000}s ago. This client will be a player.`);
+            return false;
+        }
+    }
+
+    console.log("No active host found or existing host timed out. Claiming host role.");
+    // This client is now the host.
+    await initHost(room, dataDisplayEl, currentUser.id, gameStateRecord);
+    return true;
 }
