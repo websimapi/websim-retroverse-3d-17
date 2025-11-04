@@ -368,7 +368,7 @@ export async function runHostElectionAndInit(room, currentUser, dataDisplayEl) {
 
     if (hostData && hostData.hostId && hostData.timestamp) {
         const timeSinceLastHeartbeat = now - hostData.timestamp;
-        if (hostData.hostId !== currentUser.id && timeSinceLastHeartbeat < HOST_TIMEOUT_DURATION) {
+        if (timeSinceLastHeartbeat < HOST_TIMEOUT_DURATION) {
             console.log(`An active host (${hostData.hostId}) was found. Last heartbeat was ${timeSinceLastHeartbeat / 1000}s ago. This client will be a player.`);
             return false;
         }
